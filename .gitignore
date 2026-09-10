@@ -1,0 +1,26 @@
+# === Python 虛擬環境與快取 ===
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+env/
+venv/
+.venv/
+pip-log.txt
+pip-delete-this-directory.txt
+
+# === 專案產出的影音與字幕檔 ===
+my_music/
+my_videos/
+downloads/
+*.mp3
+*.mp4
+*.mkv
+*.srt
+
+# === 系統與編輯器設定 ===
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
