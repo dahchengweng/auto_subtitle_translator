@@ -1,5 +1,7 @@
 import os
 from faster_whisper import WhisperModel
+from translate import Translator as LocalTranslator
+from opencc import OpenCC
 
 class WhisperTranslator:
     _instance = None
@@ -10,88 +12,93 @@ class WhisperTranslator:
             cls._instance._initialized = False
         return cls._instance
 
-    def __init__(self, model_path_or_name='base', device="auto", compute_type="default"):
-        """
-        model_path_or_name 可以接受：
-        1. 官方版本名稱: 'tiny', 'base', 'small', 'medium', 'large-v3'
-        2. 本機 CTranslate2 格式的模型資料夾路徑 (例如: 'D:/models/faster-whisper-base')
-        device: "auto", "cuda", "cpu"
-        compute_type: 運算精度，GPU 推薦 "float16" 或 "int8_float16"，CPU 推薦 "int8"
-        """
+    def __init__(self, model_path_or_name='Systran/faster-whisper-medium', cache_dir=None, device="auto", compute_type="default"):
         if self._initialized:
             return
             
-        print(f"[系統初始化] 正在載入 faster-whisper 模型/路徑: {model_path_or_name}...")
-        
-        # 初始化模型 (faster-whisper 會自動偵測 GPU/CPU)
-        self.model = WhisperModel(
-            model_path_or_name, 
-            device=device, 
-            compute_type=compute_type
-        )
-        
-        print("[系統初始化] faster-whisper 模型載入成功！")
+        print(f"[系統初始化] 正在載入標準 Medium 模型: {model_path_or_name}...")
+        if cache_dir and os.path.exists(cache_dir):
+            self.model = WhisperModel(
+                model_path_or_name, device=device, compute_type=compute_type,
+                download_root=cache_dir, local_files_only=True     
+            )
+        else:
+            self.model = WhisperModel(model_path_or_name, device=device, compute_type=compute_type)
+            
+        self.cc = OpenCC('s2twp')  # 簡體轉台灣繁體 (英文翻中文時使用)
+        self.en_translator = LocalTranslator(from_lang="en", to_lang="zh-TW") # 外部翻譯 (英文片備援用)
+        print("[系統初始化] Medium 模型載入成功！")
         self._initialized = True
 
     def _format_time(self, seconds):
-        """將秒數轉換為 SRT 的時間格式 (HH:MM:SS,mmm)"""
         hours = int(seconds // 3600)
         minutes = int((seconds % 3600) // 60)
         secs = int(seconds % 60)
         milliseconds = int((seconds - int(seconds)) * 1000)
         return f"{hours:02d}:{minutes:02d}:{secs:02d},{milliseconds:03d}"
 
-    def _write_srt(self, segments, output_path):
-        """將 faster-whisper 的 segments 迭代器寫入成 SRT 檔案"""
+    def _write_srt(self, segments, output_path, convert_to_tw=False):
         with open(output_path, "w", encoding="utf-8") as f:
             for i, segment in enumerate(segments, start=1):
                 start_time = self._format_time(segment.start)
                 end_time = self._format_time(segment.end)
+                text = segment.text.strip()
+                if convert_to_tw:
+                    text = self.cc.convert(text)
                 f.write(f"{i}\n")
                 f.write(f"{start_time} --> {end_time}\n")
-                f.write(f"{segment.text.strip()}\n\n")
+                f.write(f"{text}\n\n")
 
     def transcribe_to_chinese(self, audio_path, output_dir='downloads'):
-        """強制翻譯/辨識為中文字幕"""
+        """適合【英文影片】➔ 翻譯成【繁體中文字幕】"""
         if not os.path.exists(audio_path):
-            print(f"[錯誤] 找不到音檔: {audio_path}")
             return None
 
         print(f"\n[語音辨識] 開始處理音檔: {os.path.basename(audio_path)}")
-        
-        # language='zh' 強制輸出中文
-        segments, info = self.model.transcribe(audio_path, language='zh')
-        print(f"🌐 偵測到原始語音語言: 【 {info.language} 】(信心度: {info.language_probability:.2f})")
-        print("⏳ 正在進行語音轉文字並翻譯為中文 (faster-whisper)...")
+        # 先讓大模型用標準英文解碼，取得最精準的英文，再外部翻譯防呆
+        segments, info = self.model.transcribe(audio_path, language='en')
+        print(f"🌐 原始語音偵測: 【 {info.language} 】")
+        print("⏳ 正在跨語言翻譯為繁體中文字幕...")
 
         base_name = os.path.splitext(os.path.basename(audio_path))[0]
         srt_filename = f"{base_name}_zh.srt"
         full_srt_path = os.path.join(output_dir, srt_filename)
 
-        # faster-whisper 的 segments 是 generator，在寫入時才會真正觸發計算
-        self._write_srt(segments, full_srt_path)
+        with open(full_srt_path, "w", encoding="utf-8") as f:
+            for i, segment in enumerate(segments, start=1):
+                start_time = self._format_time(segment.start)
+                end_time = self._format_time(segment.end)
+                try:
+                    translated = self.en_translator.translate(segment.text)
+                    final_text = self.cc.convert(translated)
+                except Exception:
+                    final_text = segment.text  
+                f.write(f"{i}\n")
+                f.write(f"{start_time} --> {end_time}\n")
+                f.write(f"{final_text.strip()}\n\n")
 
-        print(f"💾 中文字幕轉檔完成！")
+        print(f"💾 繁體中文字幕轉檔完成！")
         return srt_filename
 
     def transcribe_to_english(self, audio_path, output_dir='downloads'):
-        """強制翻譯為英文字幕"""
+        """🎯 核心修改：適合【中文影片】➔ 翻譯成【英文字幕】"""
         if not os.path.exists(audio_path):
-            print(f"[錯誤] 找不到音檔: {audio_path}")
             return None
 
         print(f"\n[語音辨識] 開始處理音檔: {os.path.basename(audio_path)}")
         
-        # task='translate' 會自動把任何語言翻譯成英文
+        # 🌟 關鍵調整：不指定語系（自動偵測中文）或是指定 language='zh'，並強迫開啟 task='translate'
+        # Medium 完整模型只要偵測到中文語音，就會在核心內部將它完美「直翻成英文」吐出來！
         segments, info = self.model.transcribe(audio_path, task='translate')
-        print(f"🌐 偵測到原始語音語言: 【 {info.language} 】(信心度: {info.language_probability:.2f})")
-        print("⏳ 正在進行語音轉文字並翻譯為英文 (faster-whisper)...")
+        print(f"🌐 原始語音偵測: 【 {info.language} 】 (信心度: {info.language_probability:.2f})")
+        print("⏳ 正在由 Medium 模型本地原生翻譯為英文字幕...")
 
         base_name = os.path.splitext(os.path.basename(audio_path))[0]
         srt_filename = f"{base_name}_en.srt"
         full_srt_path = os.path.join(output_dir, srt_filename)
-
-        self._write_srt(segments, full_srt_path)
-
+        
+        # 寫入檔案（因為輸出是英文，convert_to_tw 設為 False 關閉繁簡轉換）
+        self._write_srt(segments, full_srt_path, convert_to_tw=False)
+        
         print(f"💾 英文字幕轉檔完成！")
         return srt_filename

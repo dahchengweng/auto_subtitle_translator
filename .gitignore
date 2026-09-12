@@ -12,7 +12,7 @@ pip-delete-this-directory.txt
 
 # === 專案產出的影音與字幕檔 ===
 my_music/
-my_videos/
+my_video/
 downloads/
 *.mp3
 *.mp4

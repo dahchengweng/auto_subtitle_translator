@@ -10,78 +10,75 @@ class YouTubeDownloader:
             cls._instance._initialized = False
         return cls._instance
 
-    def __init__(self, ffmpeg_path=None, output_dir='my_video'):
+    def __init__(self, ffmpeg_path=None, output_dir='downloads', quality='320'):
         if self._initialized:
             return
-            
         self.ffmpeg_path = ffmpeg_path
         self.output_dir = output_dir
-        self.last_video_file = None  # 儲存最終的影片檔名
-        self.last_mp3_file = None    # 儲存最終的 MP3 檔名
+        self.quality = quality  
         
         if not os.path.exists(self.output_dir):
             os.makedirs(self.output_dir)
-            
         self._initialized = True
 
-    def _ytdl_hook(self, d):
-        """用來攔截下載與合併完成後的實體檔案"""
-        if d['status'] == 'finished':
-            # 這裡能抓到下載過程中產生或最終合併的檔案路徑
-            filepath = d['info_dict'].get('filepath')
-            if filepath:
-                filename = os.path.basename(filepath)
-                # 依副檔名判斷並存入對應的變數
-                if filename.lower().endswith('.mp3'):
-                    self.last_mp3_file = filename
-                else:
-                    self.last_video_file = filename
-
     def download_video_and_mp3(self, url):
-        """下載最高畫質影片，並同時額外轉出一份 MP3，成功會回傳 (影片檔名, MP3檔名)"""
-        self.last_video_file = None
-        self.last_mp3_file = None
-        
-        outtmpl_path = os.path.join(self.output_dir, '%(title)s.%(ext)s')
-        
-        ydl_opts = {
-            'format': 'bestvideo+bestaudio/best', 
-            'outtmpl': outtmpl_path,
-            'quiet': True,
-            # 核心設定：抽取音訊成 MP3，並開啟 keepvideo 確保原本的影片不會被刪除
-            'postprocessors': [
-                {
+        """分別單獨下載音訊(MP3)與影片(MP4)，確保兩個實體檔案絕對存在，徹底防呆"""
+        try:
+            print(f"[開始下載] 正在處理 YouTube 媒體資源...")
+            
+            # 1. 取得影片 ID 作為唯一檔名基準
+            with yt_dlp.YoutubeDL({'quiet': True}) as ydl:
+                info = ydl.extract_info(url, download=False)
+                video_id = info['id']
+            
+            video_filename = f"{video_id}.mp4"
+            mp3_filename = f"{video_id}.mp3"
+            
+            # 🎯 步驟一：專門下載最佳音訊並強制轉為 MP3
+            print(f"🎵 正在單獨分離並下載高品質 MP3 音檔 (音質: {self.quality}kbps)...")
+            ydl_opts_audio = {
+                'format': 'bestaudio/best',
+                'outtmpl': os.path.join(self.output_dir, video_id),  # 先不寫副檔名，讓後處理器補上 .mp3
+                'quiet': True,
+                'postprocessors': [{
                     'key': 'FFmpegExtractAudio',
                     'preferredcodec': 'mp3',
-                    'preferredquality': '192',
-                },
-                {
-                    'key': 'FFmpegVideoConvertor',
-                    'preferedformat': 'mp4', # 確保影片格式統一為方便合成的 mp4
-                }
-            ],
-            'keepvideo': True, # 🌟 關鍵：強制保留下載下來的影片檔
-        }
-
-        if self.ffmpeg_path:
-            ydl_opts['ffmpeg_location'] = self.ffmpeg_path
-
-        # 透過 postprocessor_hooks 追蹤最終產生的所有檔案
-        ydl_opts['postprocessor_hooks'] = [self._ytdl_hook]
-
-        try:
-            print(f"[開始下載] 正在下載影片並分離 MP3 音檔...")
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                # 這裡 yt-dlp 會自動處理：下載影音 -> 複製一份轉 MP3 -> 保留原影音
-                info = ydl.extract_info(url, download=True)
+                    'preferredquality': self.quality,
+                }],
+            }
+            if self.ffmpeg_path:
+                ydl_opts_audio['ffmpeg_location'] = self.ffmpeg_path
                 
-                # 防呆補充：如果 hook 沒抓完整，從 info 內補抓標題檔名
-                if not self.last_video_file:
-                    self.last_video_file = f"{info['title']}.mp4"
-                if not self.last_mp3_file:
-                    self.last_mp3_file = f"{info['title']}.mp3"
-                    
-            return self.last_video_file, self.last_mp3_file
+            with yt_dlp.YoutubeDL(ydl_opts_audio) as ydl:
+                ydl.download([url])
+
+            # 🎯 步驟二：專門下載最高畫質影片並封裝為 MP4
+            print(f"🎬 正在單獨下載最高畫質 MP4 影片檔...")
+            ydl_opts_video = {
+                'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/bestvideo+bestaudio/best',
+                'outtmpl': os.path.join(self.output_dir, f"{video_id}.%(ext)s"),
+                'quiet': True,
+                'postprocessors': [{
+                    'key': 'FFmpegVideoConvertor',
+                    'preferedformat': 'mp4',
+                }],
+            }
+            if self.ffmpeg_path:
+                ydl_opts_video['ffmpeg_location'] = self.ffmpeg_path
+                
+            with yt_dlp.YoutubeDL(ydl_opts_video) as ydl:
+                ydl.download([url])
+
+            # 檢查檔案是否真的都在硬碟裡，做最後防呆
+            full_video_path = os.path.join(self.output_dir, video_filename)
+            full_mp3_path = os.path.join(self.output_dir, mp3_filename)
+            
+            if os.path.exists(full_video_path) and os.path.exists(full_mp3_path):
+                return video_filename, mp3_filename
+            else:
+                print("[錯誤] 偵測到下載檔案缺失，請確認 FFmpeg 是否安裝正確。")
+                return None, None
+            
         except Exception as e:
-            print(f"[發生錯誤] 下載失敗: {e}")
+            print(f"[發生錯誤] 下載流程失敗: {e}")
             return None, None
